@@ -1,21 +1,8 @@
 /*
- BitTicker is Copyright 2011 Stephen Oliver
- http://github.com/mrsteveman1
+ BitTicker is Copyright 2012 Stephen Oliver
+ http://github.com/infincia
  
- This program is free software; you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation; either version 2 of the License, or
- (at your option) any later version.
- 
- This program is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with this program; if not, write to the Free Software
- Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA 
- */
+*/
 
 #import "StatusItemView.h"
 #import <QuartzCore/QuartzCore.h>
@@ -23,10 +10,12 @@
 #define StatusItemViewPaddingWidth  6
 #define StatusItemViewPaddingHeight 3
 #define StatusItemWidth 50
+#define ColorFadeFramerate 30.0
+#define ColorFadeDuration 1.0
 
 @implementation StatusItemView
 
-@synthesize statusItem;
+@synthesize statusItem, previousTickerValue, colorTimer;
 
 - (void)drawRect:(NSRect)rect {
     // Draw status bar background, highlighted if menu is showing
@@ -35,13 +24,13 @@
     
     NSPoint point = NSMakePoint(1, 1);
     NSMutableDictionary *fontAttributes = [[NSMutableDictionary alloc] init];
-    NSFont *font = [NSFont fontWithName:@"LucidaGrande" size:16];
+    NSFont *font = [NSFont fontWithName:@"LucidaGrande-Bold" size:16];
     
-    NSColor *black = [NSColor blackColor];
+    
     NSColor *white = [NSColor whiteColor];
     [fontAttributes setObject:font forKey:NSFontAttributeName];
     
-    NSString *tickerPretty = [NSString stringWithFormat:@"$%0.2f",[tickerValue floatValue]];
+    NSString *tickerPretty = [currencyFormatter stringFromNumber:tickerValue];
     CGSize expected = [tickerPretty sizeWithAttributes:fontAttributes];
     CGRect newFrame = self.frame;
     newFrame.size.width = expected.width + 5;
@@ -54,33 +43,59 @@
         [tickerPretty drawAtPoint:point withAttributes:fontAttributes];
     }
     else {
-        [fontAttributes setObject:black forKey:NSForegroundColorAttributeName];
+        NSColor *foreground_color;
+        if(isAnimating){
+            NSTimeInterval duration = -1.0 * [lastUpdated timeIntervalSinceNow];
+            double colorAlpha;
+            
+            if(duration >= ColorFadeDuration){
+                [self.colorTimer invalidate];
+                isAnimating = NO;
+                colorAlpha = 0.0;
+            } else {
+                colorAlpha = 1.0 - (duration / ColorFadeDuration);
+            }
+            
+            foreground_color = [currentColor blendedColorWithFraction:colorAlpha ofColor:flashColor];
+        }
+        else foreground_color = currentColor;
+        
+        [fontAttributes setObject:foreground_color forKey:NSForegroundColorAttributeName];
         [tickerPretty drawAtPoint:point withAttributes:fontAttributes];
     }   
-    
-    [fontAttributes release];
 }
 
 
 - (id)initWithFrame:(NSRect)frame {
 	CGRect newFrame = CGRectMake(0,0,StatusItemWidth,[[NSStatusBar systemStatusBar] thickness]);
     self = [super initWithFrame:newFrame];
-    if (self) {
-        self.tickerValue = [NSNumber numberWithInt:0];
-        statusItem = nil;
-        isMenuVisible = NO;
-        [statusItem setLength:StatusItemWidth];
-    }
+    
+	firstTick = YES;
+	self.previousTickerValue = [NSNumber numberWithInt:0];
+	self.tickerValue = [NSNumber numberWithInt:0];
+	flashColor = [NSColor blackColor];
+	currentColor = [NSColor blackColor];
+	lastUpdated = [NSDate date];
+	statusItem = nil;
+	isMenuVisible = NO;
+	isAnimating = NO;
+	[statusItem setLength:StatusItemWidth];
+	
+	currencyFormatter = [[NSNumberFormatter alloc] init];
+	currencyFormatter.numberStyle = NSNumberFormatterCurrencyStyle;
+	currencyFormatter.currencyCode = @"USD"; // TODO: Base on market currency
+	currencyFormatter.thousandSeparator = @","; // TODO: Base on local seperator for currency
+	currencyFormatter.alwaysShowsDecimalSeparator = YES;
+	currencyFormatter.hasThousandSeparators = YES;
+	currencyFormatter.minimumFractionDigits = 2; // TODO: Configurable
+    
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveTicker:) name:@"MtGox-Ticker" object:nil];
+
     return self;
 }
 
-- (void)dealloc {
-    [statusItem release];
-    [tickerValue release];
-    [super dealloc];
-}
-
 - (void)mouseDown:(NSEvent *)event {
+	NSLog(@"Menu click");
     [[self menu] setDelegate:self];
     [statusItem popUpStatusItemMenu:[self menu]];
     [self setNeedsDisplay:YES];
@@ -111,11 +126,59 @@
     }    
 }
 
-- (void)setTickerValue:(NSNumber *)value {
-    [value retain];
-    [tickerValue release];
-    tickerValue = value;
+- (void)updateFade {
     [self setNeedsDisplay:YES];
+}
+
+- (void)setTickerValue:(NSNumber *)value {
+    previousTickerValue = tickerValue;
+    tickerValue = value;
+    BOOL animate_color = YES;
+    if(firstTick){
+        firstTick = NO;
+        animate_color = NO;
+    } else if(tickerValue > previousTickerValue){
+
+        flashColor = [NSColor greenColor];
+
+        currentColor = [NSColor colorWithDeviceRed:0 green:0.55 blue:0 alpha:1.0];
+		NSLog(@"Going green...");
+    } else if(tickerValue < previousTickerValue){
+
+        flashColor = [NSColor redColor];
+
+		currentColor = [NSColor colorWithDeviceRed:0.55 green:0 blue:0 alpha:1.0];
+		NSLog(@"Going red...");
+
+    } else {
+        animate_color = NO;
+    }
+    
+    if(animate_color){
+        
+        self.colorTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0/ColorFadeFramerate)
+                                                       target:self
+                                                     selector:@selector(updateFade)
+                                                     userInfo:nil
+                                                      repeats:YES];
+        
+        lastUpdated = [NSDate date];
+        isAnimating = YES;
+    }
+
+    
+    [self setNeedsDisplay:YES];
+    
+
+}
+
+-(void)didReceiveTicker:(NSNotification *)notification {
+	NSDictionary *ticker = [[notification object] objectForKey:@"ticker"];
+
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self setTickerValue:[ticker objectForKey:@"last"]];
+	});
+
 }
 
 - (NSNumber *)tickerValue {
